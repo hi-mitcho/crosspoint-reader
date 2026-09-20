@@ -115,6 +115,12 @@ EpdFontFamily notosans18FontFamily(&notosans18RegularFont, &notosans18BoldFont, 
 EpdFont smallFont(&notosans_8_regular);
 EpdFontFamily smallFontFamily(&smallFont);
 
+// Display font for card titles (Home Screen card grid). Only one weight is
+// available, so it's registered as the family's "regular" slot; requesting
+// BOLD/ITALIC falls back to it automatically (EpdFontFamily::getFont).
+EpdFont responder18ItalicFont(&responder_18_italic);
+EpdFontFamily responder18FontFamily(&responder18ItalicFont);
+
 EpdFont ui10RegularFont(&ubuntu_10_regular);
 EpdFont ui10BoldFont(&ubuntu_10_bold);
 EpdFontFamily ui10FontFamily(&ui10RegularFont, &ui10BoldFont);
@@ -329,6 +335,7 @@ void setupDisplayAndFonts(bool seamless = false) {
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
+  renderer.insertFont(RESPONDER_18_FONT_ID, responder18FontFamily);
 
   // Discover and load SD card fonts
   sdFontSystem.begin(renderer);

@@ -10,28 +10,21 @@
 struct Rect;
 
 class HomeActivity final : public Activity {
+  // Selectable cards ahead of the quick-link strip: Current Read, Weather,
+  // Next Reader Articles. The Top 3 Reminders card and the logo/decorative
+  // slots are display-only (no data source wired yet), so they're skipped in
+  // the selection order.
+  static constexpr int CARD_COUNT = 3;
+
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
-  bool recentsLoading = false;
-  bool recentsLoaded = false;
   bool firstRenderDone = false;
   bool hasOpdsServers = false;
-  bool coverRendered = false;      // Track if cover has been rendered once
-  bool coverBufferStored = false;  // Track if cover buffer is stored
-  uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
-  size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
-  // Logical rect last passed to drawRecentBookCover. The cover snapshot only
-  // needs to cover this region, not the entire framebuffer, so we cache the
-  // tile instead of all 48 KB. Set in render() before the call.
-  int coverRectX = 0;
-  int coverRectY = 0;
-  int coverRectW = 0;
-  int coverRectH = 0;
   std::vector<RecentBook> recentBooks;
   const HomeMenuItem initialMenuItem;
   const bool cleanInitialRefresh;
 
-  // Convert HomeMenuItem to menu index (used in onEnter)
+  // Convert HomeMenuItem to a quick-link strip index (used in onEnter)
   static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl) {
     int i = 0;
     if (item == HomeMenuItem::FILE_BROWSER) return i;
@@ -46,7 +39,7 @@ class HomeActivity final : public Activity {
     return 0;
   }
 
-  // Convert menu index to HomeMenuItem (used in loop)
+  // Convert a quick-link strip index back to a HomeMenuItem (used in loop)
   static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl) {
     int i = 0;
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
@@ -56,6 +49,8 @@ class HomeActivity final : public Activity {
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }
+  static int quickLinkCount(bool hasOpdsUrl) { return hasOpdsUrl ? 5 : 4; }
+
   void onSelectBook(const std::string& path);
   void onFileBrowserOpen();
   void onLibraryOpen();
@@ -63,12 +58,30 @@ class HomeActivity final : public Activity {
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
 
-  int getMenuItemCount() const;
-  bool storeCoverBuffer();    // Store frame buffer for cover image
-  bool restoreCoverBuffer();  // Restore frame buffer from stored cover
-  void freeCoverBuffer();     // Free the stored cover buffer
+  int getSelectableCount() const;
   void loadRecentBooks(int maxBooks);
-  void loadRecentCovers(int coverHeight);
+
+  // Card grid drawing helpers (render.cpp keeps geometry and drawing together
+  // since both are specific to this activity's fixed 2-column layout).
+  void drawLogoCard(const Rect& rect) const;
+  void drawWeatherCard(const Rect& rect, bool selected) const;
+  void drawRemindersCard(const Rect& rect) const;
+  void drawDecorativeStrip(const Rect& rect) const;
+  void drawArticlesCard(const Rect& rect, bool selected) const;
+  // Placeholder card: title + book name if one is in progress, otherwise a
+  // "no open book" message. Skips real cover art for now (BaseTheme's shared
+  // drawRecentBookCover assumes a full-width tile and its cover-buffer
+  // snapshot/restore breaks when fed this layout's narrower card rect).
+  void drawCurrentReadCard(const Rect& rect, bool selected) const;
+  // Compact icon-only row replacing the full-size vertical button list, so
+  // the card grid gets most of the screen. rect spans the whole row; icons
+  // are evenly spaced within it.
+  void drawQuickLinkStrip(const Rect& rect, int selectedIndex) const;
+  // Draws a card title wrapped to at most 2 lines instead of a single
+  // unwrapped line, so longer strings (translations, "Continue Reading")
+  // don't run past the card's edge. Returns the y position immediately
+  // below the title block, for body text drawn under it.
+  int drawWrappedTitle(int x, int y, int maxWidth, const char* title) const;
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
