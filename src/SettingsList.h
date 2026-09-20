@@ -366,6 +366,14 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
         SettingInfo::Enum(StrId::STR_OPDS_FILENAME_FORMAT, &CrossPointSettings::opdsFilenameFormat,
                           {StrId::STR_FMT_AUTHOR_TITLE, StrId::STR_FMT_TITLE_AUTHOR, StrId::STR_FMT_TITLE},
                           "opdsFilenameFormat"),
+        // Article Module Readwise Reader API token: persisted + web-exposed
+        // (pasted via the settings web page — much faster than the on-device
+        // keyboard for a 40+ char token), category-less so it stays off the
+        // on-device Settings screen. ArticleModuleActivity's own keyboard
+        // prompt still works as a fallback; both write the same field.
+        SettingInfo::String(StrId::STR_ARTICLE_TOKEN_PROMPT, &SETTINGS.articleModuleToken[0],
+                            sizeof(SETTINGS.articleModuleToken), "articleModuleToken")
+            .withObfuscated(),
 
         // Frontlight quick-panel state: persisted and web-exposed, but hidden
         // from the on-device Settings screen because the swipe panel owns it.

@@ -110,6 +110,19 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (keyboardLayouts != 0) {
     doc["keyboardLayouts"] = keyboardLayouts;
   }
+
+  // Weather Module: not in SettingsList (int16_t/uint32_t don't fit the
+  // uint8_t generic loop). Omitted while unconfigured/never-fetched.
+  if (weatherLocation[0] != '\0') {
+    doc["weatherLocation"] = weatherLocation;
+  }
+  if (weatherLastFetchUnix != 0) {
+    doc["weatherLastFetchUnix"] = weatherLastFetchUnix;
+    doc["weatherLastTempF"] = weatherLastTempF;
+    doc["weatherLastHiF"] = weatherLastHiF;
+    doc["weatherLastLoF"] = weatherLastLoF;
+    doc["weatherLastConditionCode"] = weatherLastConditionCode;
+  }
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -242,6 +255,15 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Absent means unconfigured, which is the default.
   if (doc["keyboardLayouts"].is<uint16_t>()) {
     keyboardLayouts = doc["keyboardLayouts"].as<uint16_t>();
+  }
+
+  copyToField(weatherLocation, doc["weatherLocation"] | "", sizeof(weatherLocation));
+  if (doc["weatherLastFetchUnix"].is<uint32_t>()) {
+    weatherLastFetchUnix = doc["weatherLastFetchUnix"].as<uint32_t>();
+    weatherLastTempF = doc["weatherLastTempF"] | (int16_t)0;
+    weatherLastHiF = doc["weatherLastHiF"] | (int16_t)0;
+    weatherLastLoF = doc["weatherLastLoF"] | (int16_t)0;
+    weatherLastConditionCode = doc["weatherLastConditionCode"] | (uint8_t)0;
   }
 
   if (needsResave) {

@@ -11,6 +11,7 @@
 
 #include "CrossPointSettings.h"
 #include "OpdsServerStore.h"
+#include "articles/ArticleModuleActivity.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -26,6 +27,7 @@
 #include "util/BmpViewerActivity.h"
 #include "util/FrontlightPanelActivity.h"
 #include "util/FullScreenMessageActivity.h"
+#include "weather/WeatherModuleActivity.h"
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -319,6 +321,14 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
   replaceActivity(std::make_unique<HomeActivity>(renderer, mappedInput, initialMenuItem, cleanInitialRefresh));
 }
 void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToWeatherModule() {
+  replaceActivity(std::make_unique<WeatherModuleActivity>(renderer, mappedInput));
+}
+
+void ActivityManager::goToArticleModule() {
+  replaceActivity(std::make_unique<ArticleModuleActivity>(renderer, mappedInput));
+}
 
 void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
   mappedInput.resetHomeButtonInput();

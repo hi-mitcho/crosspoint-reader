@@ -1,0 +1,44 @@
+#pragma once
+#include <string>
+#include <vector>
+
+// Summary fields for one Readwise Reader document, as returned by the list
+// endpoint. Deliberately excludes html_content: SLO-6's first slice syncs and
+// archives articles but does not render full content yet.
+struct ReadwiseArticle {
+  std::string id;
+  std::string title;
+  std::string author;
+  std::string summary;
+  std::string location;  // "new" | "later" | "shortlist" | "archive" | "feed"
+  int wordCount = 0;
+};
+
+/**
+ * HTTP client for the Readwise Reader API (SLO-6).
+ *
+ * Base URL: https://readwise.io/api/v3/
+ *
+ * API Endpoints:
+ *   GET   /list/          - List documents (used here: no location filter)
+ *   PATCH /update/:id/    - Update a document (used here: location=archive)
+ *
+ * Authentication: static per-account token, "Authorization: Token <token>".
+ * No OAuth flow (see PRD.md's read-later service decision).
+ */
+class ReadwiseClient {
+ public:
+  enum Error { OK, NO_TOKEN, LOW_MEMORY, NETWORK_ERROR, AUTH_FAILED, SERVER_ERROR };
+
+  // Fetches unarchived documents across all locations (new/later/shortlist) —
+  // freshly-saved items land in "new" by default and many accounts never
+  // manually triage into "later", so filtering to just "later" hid them.
+  // "archive" and "feed" (RSS) are excluded client-side. Manual/on-demand
+  // only (SLO-6) — no incremental updatedAfter tracking in this first slice.
+  static Error listUnarchived(std::vector<ReadwiseArticle>& outArticles, int limit = 50);
+
+  // Marks a document archived.
+  static Error archive(const std::string& documentId);
+
+  static int lastHttpCode;
+};
