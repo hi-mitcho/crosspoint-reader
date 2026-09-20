@@ -362,6 +362,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   int16_t weatherLastLoF = 0;
   uint8_t weatherLastConditionCode = 0;  // raw WMO weather code; mapped to a StrId at render time
 
+  // Article Module: Readwise Reader API token (SLO-6). Category-less,
+  // obfuscated SettingInfo::String entry in SettingsList.h — persisted and
+  // web-exposed (pasted via the settings web page) but hidden from the
+  // on-device Settings screen.
+  char articleModuleToken[64] = "";
+
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
   static constexpr uint8_t MAX_SLEEP_TIMEOUT_MINUTES = SLEEP_TIMEOUT_NEVER_MINUTES;

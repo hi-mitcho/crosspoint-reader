@@ -11,6 +11,7 @@
 
 #include "CrossPointSettings.h"
 #include "OpdsServerStore.h"
+#include "articles/ArticleModuleActivity.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -323,6 +324,10 @@ void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<Crash
 
 void ActivityManager::goToWeatherModule() {
   replaceActivity(std::make_unique<WeatherModuleActivity>(renderer, mappedInput));
+}
+
+void ActivityManager::goToArticleModule() {
+  replaceActivity(std::make_unique<ArticleModuleActivity>(renderer, mappedInput));
 }
 
 void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
