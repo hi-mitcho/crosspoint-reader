@@ -18,8 +18,13 @@
 // a later Activity to inherit).
 class ArticleModuleActivity final : public UiListActivity {
  public:
-  explicit ArticleModuleActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : UiListActivity("ArticleModule", renderer, mappedInput) {}
+  // initialArticleId: when set (Home Screen tapped a cached title directly),
+  // jump straight to that article's detail once sync completes instead of
+  // showing the list first. Falls back to the list if the id isn't found
+  // (e.g. archived elsewhere since the cache was written).
+  explicit ArticleModuleActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
+                                 std::string initialArticleId = "")
+      : UiListActivity("ArticleModule", renderer, mappedInput), pendingArticleId(std::move(initialArticleId)) {}
 
   void onEnter() override;
   void onExit() override;
@@ -39,12 +44,15 @@ class ArticleModuleActivity final : public UiListActivity {
   bool shouldTearDownWifiOnExit = false;
   std::vector<ReadwiseArticle> articles;
   std::vector<freeink::ui::ListItem> rowItems_;
+  std::string pendingArticleId;
 
   void promptForToken();
   void onTokenEntered(const ActivityResult& result);
   void ensureWifiConnected(std::function<void()> onConnected);
   void beginSync();
   void syncArticles();
+  void cacheSyncResultForHomeScreen();
   void rebuildRowItems();
+  void openPendingArticleIfPresent();
   void onDetailClosed(int index, const ActivityResult& result);
 };

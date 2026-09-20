@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <ctime>
 #include <variant>
 
 #include "ArticleDetailActivity.h"
@@ -42,10 +43,9 @@ void ArticleModuleActivity::onExit() {
 }
 
 void ArticleModuleActivity::promptForToken() {
-  startActivityForResult(
-      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_ARTICLE_TOKEN_PROMPT), "", 63,
-                                              InputType::Password),
-      [this](const ActivityResult& result) { onTokenEntered(result); });
+  startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_ARTICLE_TOKEN_PROMPT),
+                                                                 "", 63, InputType::Password),
+                         [this](const ActivityResult& result) { onTokenEntered(result); });
 }
 
 void ArticleModuleActivity::onTokenEntered(const ActivityResult& result) {
@@ -103,6 +103,22 @@ void ArticleModuleActivity::syncArticles() {
   }
 
   rebuildRowItems();
+  cacheSyncResultForHomeScreen();
+}
+
+void ArticleModuleActivity::cacheSyncResultForHomeScreen() {
+  const uint8_t count =
+      std::min(static_cast<uint8_t>(articles.size()), CrossPointSettings::ARTICLES_CACHED_TITLE_COUNT);
+  for (uint8_t i = 0; i < count; i++) {
+    const char* title = articles[i].title.empty() ? tr(STR_ARTICLE_UNTITLED) : articles[i].title.c_str();
+    strncpy(SETTINGS.articlesTitles[i], title, sizeof(SETTINGS.articlesTitles[0]) - 1);
+    SETTINGS.articlesTitles[i][sizeof(SETTINGS.articlesTitles[0]) - 1] = '\0';
+    strncpy(SETTINGS.articlesIds[i], articles[i].id.c_str(), sizeof(SETTINGS.articlesIds[0]) - 1);
+    SETTINGS.articlesIds[i][sizeof(SETTINGS.articlesIds[0]) - 1] = '\0';
+  }
+  SETTINGS.articlesCachedTitleCount = count;
+  SETTINGS.articlesLastSyncUnix = static_cast<uint32_t>(time(nullptr));
+  SETTINGS.saveToFile();
 }
 
 void ArticleModuleActivity::loop() {
@@ -112,10 +128,23 @@ void ArticleModuleActivity::loop() {
     syncArticles();
     state = State::LIST;
     requestUpdate();
+    openPendingArticleIfPresent();
     return;
   }
 
   UiListActivity::loop();
+}
+
+void ArticleModuleActivity::openPendingArticleIfPresent() {
+  if (pendingArticleId.empty()) return;
+  const std::string id = std::move(pendingArticleId);
+  pendingArticleId.clear();
+
+  const auto it =
+      std::find_if(articles.begin(), articles.end(), [&id](const ReadwiseArticle& a) { return a.id == id; });
+  if (it != articles.end()) {
+    activateIndex(static_cast<int>(it - articles.begin()));
+  }
 }
 
 int ArticleModuleActivity::listCount() const { return state == State::LIST ? static_cast<int>(articles.size()) : 0; }
@@ -147,8 +176,9 @@ void ArticleModuleActivity::buildScreen(UiScreen& screen) {
   }
 
   if (articles.empty()) {
-    const char* msg =
-        noWifi ? tr(STR_ARTICLE_NO_WIFI) : syncFailed ? tr(STR_ARTICLE_SYNC_FAILED) : tr(STR_ARTICLE_EMPTY);
+    const char* msg = noWifi       ? tr(STR_ARTICLE_NO_WIFI)
+                      : syncFailed ? tr(STR_ARTICLE_SYNC_FAILED)
+                                   : tr(STR_ARTICLE_EMPTY);
     screen.centeredText(msg, screen.theme().bodyText);
     return;
   }

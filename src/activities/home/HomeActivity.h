@@ -15,9 +15,18 @@ class HomeActivity final : public Activity {
   // slots are display-only (no data source wired yet), so they're skipped in
   // the selection order.
   static constexpr int CARD_COUNT = 3;
+  // Vertical gap between cached title rows in the Articles card. Shared by
+  // drawArticlesCard and articleTitleRowIndexAt so their geometry can't drift.
+  static constexpr int ARTICLE_ROW_GAP = 10;
 
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
+  // Sub-selection within the Articles card (selectorIndex == 2): -1 means the
+  // card itself is highlighted (Select opens the list), 0..cachedCount-1
+  // highlights one cached title row (Select opens that article directly).
+  // Entering the card from above starts at -1 and Next drills into row 0;
+  // entering from below starts at the last row and Previous backs out to -1.
+  int articlesSelectedRow = -1;
   bool firstRenderDone = false;
   bool hasOpdsServers = false;
   std::vector<RecentBook> recentBooks;
@@ -67,7 +76,11 @@ class HomeActivity final : public Activity {
   void drawWeatherCard(const Rect& rect, bool selected) const;
   void drawRemindersCard(const Rect& rect) const;
   void drawDecorativeStrip(const Rect& rect) const;
-  void drawArticlesCard(const Rect& rect, bool selected) const;
+  void drawArticlesCard(const Rect& rect, bool selected, int selectedRow) const;
+  // Hit-tests a tap point against the Articles card's cached title rows,
+  // matching drawArticlesCard's layout. Returns the tapped title's index, or
+  // -1 if the tap wasn't on a row (header, padding, or empty state).
+  int articleTitleRowIndexAt(const Rect& rect, int x, int y) const;
   // Placeholder card: title + book name if one is in progress, otherwise a
   // "no open book" message. Skips real cover art for now (BaseTheme's shared
   // drawRecentBookCover assumes a full-width tile and its cover-buffer

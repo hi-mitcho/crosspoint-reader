@@ -77,6 +77,7 @@ void HomeActivity::onEnter() {
 
   selectorIndex =
       initialMenuItem == HomeMenuItem::NONE ? 0 : CARD_COUNT + menuItemToIndex(initialMenuItem, hasOpdsServers);
+  articlesSelectedRow = -1;
 
   // Trigger first update
   requestUpdate();
@@ -99,7 +100,11 @@ void HomeActivity::loop() {
         activityManager.goToWeatherModule();
         return;
       case 2:
-        activityManager.goToArticleModule();
+        if (articlesSelectedRow >= 0 && articlesSelectedRow < static_cast<int>(SETTINGS.articlesCachedTitleCount)) {
+          activityManager.goToArticleModule(SETTINGS.articlesIds[articlesSelectedRow]);
+        } else {
+          activityManager.goToArticleModule();
+        }
         return;
       default:
         break;
@@ -126,25 +131,46 @@ void HomeActivity::loop() {
     }
   };
 
-  buttonNavigator.onNext([this, selectableCount] {
+  // Moving "next" while the Articles card is highlighted drills into its
+  // cached title rows one at a time before advancing to the next card, so
+  // the selector can reach individual articles instead of skipping past the
+  // whole tile. Symmetric with movePrevious below.
+  auto moveNext = [this, selectableCount] {
+    if (selectorIndex == 2 && articlesSelectedRow + 1 < static_cast<int>(SETTINGS.articlesCachedTitleCount)) {
+      articlesSelectedRow++;
+      requestUpdate();
+      return;
+    }
     selectorIndex = ButtonNavigator::nextIndex(selectorIndex, selectableCount);
+    articlesSelectedRow = -1;
     requestUpdate();
-  });
+  };
 
-  buttonNavigator.onPrevious([this, selectableCount] {
+  auto movePrevious = [this, selectableCount] {
+    if (selectorIndex == 2 && articlesSelectedRow > -1) {
+      articlesSelectedRow--;
+      requestUpdate();
+      return;
+    }
     selectorIndex = ButtonNavigator::previousIndex(selectorIndex, selectableCount);
+    // Arriving at the Articles card from below starts at its last row, so
+    // continuing to move backward walks the rows before leaving the card.
+    articlesSelectedRow = (selectorIndex == 2 && SETTINGS.articlesCachedTitleCount > 0)
+                              ? static_cast<int>(SETTINGS.articlesCachedTitleCount) - 1
+                              : -1;
     requestUpdate();
-  });
+  };
+
+  buttonNavigator.onNext(moveNext);
+  buttonNavigator.onPrevious(movePrevious);
 
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Up) {
-    selectorIndex = ButtonNavigator::nextIndex(selectorIndex, selectableCount);
-    requestUpdate();
+    moveNext();
     return;
   }
   if (swipe == MappedInputManager::SwipeDir::Down) {
-    selectorIndex = ButtonNavigator::previousIndex(selectorIndex, selectableCount);
-    requestUpdate();
+    movePrevious();
     return;
   }
 
@@ -177,16 +203,32 @@ void HomeActivity::loop() {
   const Rect articlesRect{colBX, contentTop + currentReadHeight + rowGap, colBWidth,
                           contentBottom - (contentTop + currentReadHeight + rowGap)};
 
+  int tapX = 0;
+  int tapY = 0;
+  const bool tapped = mappedInput.wasScreenTapped(tapX, tapY);
+  const auto inRect = [](const Rect& r, int x, int y) {
+    return x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+  };
+
   int touchedCard = -1;
-  if (mappedInput.wasTapInRect(colBX, contentTop, colBWidth, currentReadHeight)) {
+  if (tapped && inRect(Rect{colBX, contentTop, colBWidth, currentReadHeight}, tapX, tapY)) {
     touchedCard = 0;
-  } else if (mappedInput.wasTapInRect(weatherRect.x, weatherRect.y, weatherRect.width, weatherRect.height)) {
+  } else if (tapped && inRect(weatherRect, tapX, tapY)) {
     touchedCard = 1;
-  } else if (mappedInput.wasTapInRect(articlesRect.x, articlesRect.y, articlesRect.width, articlesRect.height)) {
+  } else if (tapped && inRect(articlesRect, tapX, tapY)) {
+    // A tap on a specific cached title jumps straight to that article;
+    // anywhere else on the card opens the list, same as button Select.
+    const int titleIndex = articleTitleRowIndexAt(articlesRect, tapX, tapY);
+    if (titleIndex >= 0) {
+      selectorIndex = 2;
+      activityManager.goToArticleModule(SETTINGS.articlesIds[titleIndex]);
+      return;
+    }
     touchedCard = 2;
   }
   if (touchedCard != -1) {
     selectorIndex = touchedCard;
+    articlesSelectedRow = -1;  // a tap always targets the whole card, not a button-nav row highlight
     activateSelection();
     return;
   }
@@ -305,7 +347,7 @@ void HomeActivity::drawDecorativeStrip(const Rect& rect) const {
   }
 }
 
-void HomeActivity::drawArticlesCard(const Rect& rect, bool selected) const {
+void HomeActivity::drawArticlesCard(const Rect& rect, bool selected, int selectedRow) const {
   renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, selected ? 2 : 1, 8, true);
 
   constexpr int padding = 16;
@@ -313,11 +355,51 @@ void HomeActivity::drawArticlesCard(const Rect& rect, bool selected) const {
       drawWrappedTitle(rect.x + padding, rect.y + padding, rect.width - padding * 2, tr(STR_HOME_ARTICLES_TITLE));
   textY += padding;
 
-  const auto lines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_ARTICLE_EMPTY), rect.width - padding * 2, 4);
-  for (const auto& line : lines) {
-    renderer.drawText(UI_10_FONT_ID, rect.x + padding, textY, line.c_str());
-    textY += renderer.getLineHeight(UI_10_FONT_ID);
+  // Never synced or nothing unarchived: fall back to the module's own empty-state copy.
+  if (SETTINGS.articlesCachedTitleCount == 0) {
+    const auto lines = renderer.wrappedText(UI_10_FONT_ID, tr(STR_ARTICLE_EMPTY), rect.width - padding * 2, 4);
+    for (const auto& line : lines) {
+      renderer.drawText(UI_10_FONT_ID, rect.x + padding, textY, line.c_str());
+      textY += renderer.getLineHeight(UI_10_FONT_ID);
+    }
+    return;
   }
+
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  for (uint8_t i = 0; i < SETTINGS.articlesCachedTitleCount; i++) {
+    const auto lines = renderer.wrappedText(UI_10_FONT_ID, SETTINGS.articlesTitles[i], rect.width - padding * 2, 2);
+    const int rowHeight = static_cast<int>(lines.size()) * lineHeight;
+    if (static_cast<int>(i) == selectedRow) {
+      renderer.fillRoundedRect(rect.x + 6, textY - 3, rect.width - 12, rowHeight + 6, 6, Color::LightGray);
+    }
+    for (const auto& line : lines) {
+      renderer.drawText(UI_10_FONT_ID, rect.x + padding, textY, line.c_str());
+      textY += lineHeight;
+    }
+    textY += ARTICLE_ROW_GAP;
+  }
+}
+
+// Replicates drawArticlesCard's title-block and row geometry without
+// drawing, so loop() can hit-test a tap against a specific cached title.
+// Returns the cached-title index at (x, y), or -1 if the tap isn't on a row.
+int HomeActivity::articleTitleRowIndexAt(const Rect& rect, int x, int y) const {
+  if (SETTINGS.articlesCachedTitleCount == 0) return -1;
+
+  constexpr int padding = 16;
+  const auto titleLines = renderer.wrappedText(RESPONDER_18_FONT_ID, tr(STR_HOME_ARTICLES_TITLE),
+                                               rect.width - padding * 2, 2, EpdFontFamily::BOLD);
+  int rowTop =
+      rect.y + padding + static_cast<int>(titleLines.size()) * renderer.getLineHeight(RESPONDER_18_FONT_ID) + padding;
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+
+  for (uint8_t i = 0; i < SETTINGS.articlesCachedTitleCount; i++) {
+    const auto lines = renderer.wrappedText(UI_10_FONT_ID, SETTINGS.articlesTitles[i], rect.width - padding * 2, 2);
+    const int rowHeight = static_cast<int>(lines.size()) * lineHeight;
+    if (y >= rowTop && y < rowTop + rowHeight) return static_cast<int>(i);
+    rowTop += rowHeight + ARTICLE_ROW_GAP;
+  }
+  return -1;
 }
 
 void HomeActivity::drawCurrentReadCard(const Rect& rect, bool selected) const {
@@ -431,7 +513,8 @@ void HomeActivity::render(RenderLock&&) {
   drawCurrentReadCard(Rect{colBX, contentTop, colBWidth, currentReadHeight}, selectorIndex == 0);
 
   const int articlesY = contentTop + currentReadHeight + rowGap;
-  drawArticlesCard(Rect{colBX, articlesY, colBWidth, contentBottom - articlesY}, selectorIndex == 2);
+  drawArticlesCard(Rect{colBX, articlesY, colBWidth, contentBottom - articlesY}, selectorIndex == 2,
+                   selectorIndex == 2 ? articlesSelectedRow : -1);
 
   // --- Quick-link strip below the card grid ---
   const int quickLinkTop = contentBottom + metrics.verticalSpacing;
@@ -442,13 +525,7 @@ void HomeActivity::render(RenderLock&&) {
                                             tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
-  // The card grid fills much more of the screen than the old single-tile
-  // layout, so any leftover ghosting from whatever was on the panel before
-  // Home is entered is far more visible. FAST_REFRESH only touches pixels
-  // the new frame changes, so it can't clear stale dark pixels outside the
-  // areas this activity draws into. Force a full waveform on Home's first
-  // paint regardless of the caller's flag to guarantee a clean panel.
-  renderer.displayBuffer(!firstRenderDone ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
+  renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
 
   firstRenderDone = true;
 }
