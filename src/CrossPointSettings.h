@@ -351,6 +351,17 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Quick Resume: keep current content visible with moon icon instead of showing a static sleep screen.
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
 
+  // Weather Module: manual "lat,lon" location plus the last successfully
+  // fetched reading, so a cold entry has something to show before any
+  // network call completes. Not in SettingsList (the generic loop only
+  // handles uint8_t scalars); serialized manually like keyboardLayouts/language.
+  char weatherLocation[32] = "";      // "lat,lon", e.g. "29.7604,-95.3698"; empty = unconfigured
+  uint32_t weatherLastFetchUnix = 0;  // epoch seconds of last successful fetch, 0 = never
+  int16_t weatherLastTempF = 0;
+  int16_t weatherLastHiF = 0;
+  int16_t weatherLastLoF = 0;
+  uint8_t weatherLastConditionCode = 0;  // raw WMO weather code; mapped to a StrId at render time
+
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;
   static constexpr uint8_t MAX_SLEEP_TIMEOUT_MINUTES = SLEEP_TIMEOUT_NEVER_MINUTES;
