@@ -10,11 +10,14 @@
 struct Rect;
 
 class HomeActivity final : public Activity {
-  // Selectable cards ahead of the quick-link strip: Current Read, Weather,
-  // Next Reader Articles. The Top 3 Reminders card and the logo/decorative
-  // slots are display-only (no data source wired yet), so they're skipped in
-  // the selection order.
+  // Selectable cards ahead of the quick-link strip: Current Read, Next Reader
+  // Articles, Weather. The Top 3 Reminders card and the logo/decorative slots
+  // are display-only, so they're skipped in the selection order.
   static constexpr int CARD_COUNT = 3;
+  // Index of the Articles card within the selectable cards (0 = Current Read).
+  static constexpr int ARTICLES_CARD_INDEX = 1;
+  // Index of the Weather card within the selectable cards.
+  static constexpr int WEATHER_CARD_INDEX = 2;
   // Vertical gap between cached title rows in the Articles card. Shared by
   // drawArticlesCard and articleTitleRowIndexAt so their geometry can't drift.
   static constexpr int ARTICLE_ROW_GAP = 10;
@@ -73,6 +76,9 @@ class HomeActivity final : public Activity {
   // Card grid drawing helpers (render.cpp keeps geometry and drawing together
   // since both are specific to this activity's fixed 2-column layout).
   void drawLogoCard(const Rect& rect) const;
+  // Slim replacement for BaseTheme::drawHeader on Home (SLO-19): battery icon
+  // + percentage, right-aligned within rect.
+  void drawStatusBar(const Rect& rect) const;
   void drawWeatherCard(const Rect& rect, bool selected) const;
   void drawRemindersCard(const Rect& rect) const;
   void drawDecorativeStrip(const Rect& rect) const;
@@ -81,11 +87,18 @@ class HomeActivity final : public Activity {
   // matching drawArticlesCard's layout. Returns the tapped title's index, or
   // -1 if the tap wasn't on a row (header, padding, or empty state).
   int articleTitleRowIndexAt(const Rect& rect, int x, int y) const;
-  // Placeholder card: title + book name if one is in progress, otherwise a
-  // "no open book" message. Skips real cover art for now (BaseTheme's shared
-  // drawRecentBookCover assumes a full-width tile and its cover-buffer
-  // snapshot/restore breaks when fed this layout's narrower card rect).
+  // Current-read card: cover thumbnail (or a synthesized title-card fallback
+  // when no cover exists) if a book is in progress, otherwise a "no open
+  // book" message. Redraws the cover fresh from SD every render instead of
+  // reusing BaseTheme's shared drawRecentBookCover, whose full-framebuffer
+  // snapshot/restore caching assumes a full-width tile and stomps this
+  // layout's other cards when fed its narrower card rect.
   void drawCurrentReadCard(const Rect& rect, bool selected) const;
+  // Generates (if missing) and draws the given book's cover bitmap, aspect-fit
+  // and centered within maxRect, with a border around the rendered bounds.
+  // Returns false if the book has no cover or the bitmap couldn't be read,
+  // in which case the caller should fall back to a synthesized title card.
+  bool drawBookCoverThumbnail(const RecentBook& book, const Rect& maxRect) const;
   // Compact icon-only row replacing the full-size vertical button list, so
   // the card grid gets most of the screen. rect spans the whole row; icons
   // are evenly spaced within it.

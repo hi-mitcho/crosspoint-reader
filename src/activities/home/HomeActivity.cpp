@@ -1,8 +1,15 @@
 #include "HomeActivity.h"
 
+#include <Epub.h>
+#include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalDisplay.h>
+#include <HalGPIO.h>
+#include <HalPowerManager.h>
+#include <HalStorage.h>
 #include <I18n.h>
+#include <Txt.h>
+#include <Xtc.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -12,17 +19,63 @@
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "activities/weather/WeatherModuleActivity.h"
 #include "components/UITheme.h"
+#include "components/icons/battery_0.h"
+#include "components/icons/battery_100.h"
+#include "components/icons/battery_25.h"
+#include "components/icons/battery_50.h"
+#include "components/icons/battery_75.h"
+#include "components/icons/battery_charging.h"
 #include "components/icons/blocks.h"
 #include "components/icons/folder.h"
 #include "components/icons/library.h"
 #include "components/icons/settings2.h"
+#include "components/icons/slofone_logo.h"
 #include "components/icons/transfer.h"
+#include "components/icons/weather_clear.h"
+#include "components/icons/weather_cloudy.h"
+#include "components/icons/weather_drizzle.h"
+#include "components/icons/weather_fog.h"
+#include "components/icons/weather_rain.h"
+#include "components/icons/weather_rainshowers.h"
+#include "components/icons/weather_snow.h"
+#include "components/icons/weather_snowshowers.h"
+#include "components/icons/weather_thunderstorm.h"
 #include "fontIds.h"
 
 namespace {
 constexpr int QUICK_LINK_ICON_SIZE = 32;
 constexpr int QUICK_LINK_ROW_HEIGHT = 56;
+
+// SLO-19: Home has no title, so the shared header band (BaseTheme::drawHeader)
+// rendered nothing but an all-but-invisible battery glyph. Home draws its own
+// slim status row instead, reclaiming the rest of that vertical space for the
+// card grid.
+constexpr int STATUS_BAR_HEIGHT = 24;
+constexpr int BATTERY_ICON_WIDTH = 35;
+constexpr int BATTERY_ICON_HEIGHT = 16;
+constexpr int BATTERY_CHARGING_ICON_WIDTH = 29;
+
+// On-screen size of the SLOFONE wordmark bitmap (src/components/icons/slofone_logo.h),
+// generated to span the full left-column width (COL_A_WIDTH_RATIO * 480 = 180)
+// at the source asset's ~363:223 aspect ratio.
+constexpr int LOGO_ICON_WIDTH = 180;
+constexpr int LOGO_ICON_HEIGHT = 111;
+
+struct BatteryIcon {
+  const uint8_t* bitmap;
+  int width;
+};
+
+BatteryIcon batteryIconFor(uint16_t percentage, bool charging) {
+  if (charging) return {Battery_chargingIcon, BATTERY_CHARGING_ICON_WIDTH};
+  if (percentage <= 10) return {Battery_0Icon, BATTERY_ICON_WIDTH};
+  if (percentage <= 35) return {Battery_25Icon, BATTERY_ICON_WIDTH};
+  if (percentage <= 60) return {Battery_50Icon, BATTERY_ICON_WIDTH};
+  if (percentage <= 85) return {Battery_75Icon, BATTERY_ICON_WIDTH};
+  return {Battery_100Icon, BATTERY_ICON_WIDTH};
+}
 
 // Fractions of the available content area, derived from the SLO-7 mockup
 // (480x800 portrait): a narrower left column of stacked info cards next to a
@@ -44,6 +97,34 @@ constexpr float REMINDERS_HEIGHT_RATIO = 324.0f / 686.0f;
 // Right column: Current Read cover, Next Reader Articles.
 constexpr float CURRENT_READ_HEIGHT_RATIO = 337.0f / 686.0f;
 // Articles card takes whatever remains after the gap.
+
+// SLO-11: one icon per condition bucket from WeatherModuleActivity's shared
+// conditionLabel(); STR_WEATHER_COND_CLOUDY also covers STR_WEATHER_COND_UNKNOWN,
+// same fallback conditionLabel() itself uses for out-of-range WMO codes.
+const uint8_t* weatherConditionIcon(StrId label) {
+  switch (label) {
+    case StrId::STR_WEATHER_COND_CLEAR:
+      return Weather_clearIcon;
+    case StrId::STR_WEATHER_COND_FOG:
+      return Weather_fogIcon;
+    case StrId::STR_WEATHER_COND_DRIZZLE:
+      return Weather_drizzleIcon;
+    case StrId::STR_WEATHER_COND_RAIN:
+      return Weather_rainIcon;
+    case StrId::STR_WEATHER_COND_RAIN_SHOWERS:
+      return Weather_rainshowersIcon;
+    case StrId::STR_WEATHER_COND_SNOW:
+      return Weather_snowIcon;
+    case StrId::STR_WEATHER_COND_SNOW_SHOWERS:
+      return Weather_snowshowersIcon;
+    case StrId::STR_WEATHER_COND_THUNDERSTORM:
+      return Weather_thunderstormIcon;
+    case StrId::STR_WEATHER_COND_CLOUDY:
+    case StrId::STR_WEATHER_COND_UNKNOWN:
+    default:
+      return Weather_cloudyIcon;
+  }
+}
 }  // namespace
 
 int HomeActivity::getSelectableCount() const { return CARD_COUNT + quickLinkCount(hasOpdsServers); }
@@ -79,6 +160,10 @@ void HomeActivity::onEnter() {
       initialMenuItem == HomeMenuItem::NONE ? 0 : CARD_COUNT + menuItemToIndex(initialMenuItem, hasOpdsServers);
   articlesSelectedRow = -1;
 
+  // SLO-21: passive weather refresh, no WiFi-connect UI. Silent no-op unless
+  // WiFi already happens to be up and the hourly cooldown has elapsed.
+  refreshWeatherIfWifiConnected();
+
   // Trigger first update
   requestUpdate();
 }
@@ -97,14 +182,14 @@ void HomeActivity::loop() {
         }
         return;
       case 1:
-        activityManager.goToWeatherModule();
-        return;
-      case 2:
         if (articlesSelectedRow >= 0 && articlesSelectedRow < static_cast<int>(SETTINGS.articlesCachedTitleCount)) {
           activityManager.goToArticleModule(SETTINGS.articlesIds[articlesSelectedRow]);
         } else {
           activityManager.goToArticleModule();
         }
+        return;
+      case WEATHER_CARD_INDEX:
+        activityManager.goToWeatherModule();
         return;
       default:
         break;
@@ -136,7 +221,8 @@ void HomeActivity::loop() {
   // the selector can reach individual articles instead of skipping past the
   // whole tile. Symmetric with movePrevious below.
   auto moveNext = [this, selectableCount] {
-    if (selectorIndex == 2 && articlesSelectedRow + 1 < static_cast<int>(SETTINGS.articlesCachedTitleCount)) {
+    if (selectorIndex == ARTICLES_CARD_INDEX &&
+        articlesSelectedRow + 1 < static_cast<int>(SETTINGS.articlesCachedTitleCount)) {
       articlesSelectedRow++;
       requestUpdate();
       return;
@@ -147,7 +233,7 @@ void HomeActivity::loop() {
   };
 
   auto movePrevious = [this, selectableCount] {
-    if (selectorIndex == 2 && articlesSelectedRow > -1) {
+    if (selectorIndex == ARTICLES_CARD_INDEX && articlesSelectedRow > -1) {
       articlesSelectedRow--;
       requestUpdate();
       return;
@@ -155,7 +241,7 @@ void HomeActivity::loop() {
     selectorIndex = ButtonNavigator::previousIndex(selectorIndex, selectableCount);
     // Arriving at the Articles card from below starts at its last row, so
     // continuing to move backward walks the rows before leaving the card.
-    articlesSelectedRow = (selectorIndex == 2 && SETTINGS.articlesCachedTitleCount > 0)
+    articlesSelectedRow = (selectorIndex == ARTICLES_CARD_INDEX && SETTINGS.articlesCachedTitleCount > 0)
                               ? static_cast<int>(SETTINGS.articlesCachedTitleCount) - 1
                               : -1;
     requestUpdate();
@@ -191,17 +277,21 @@ void HomeActivity::loop() {
   const int colBWidth = static_cast<int>(pageWidth * COL_B_WIDTH_RATIO);
   const int colBX = sideMargin + colAWidth + gutter;
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  const int contentTop = metrics.topPadding + STATUS_BAR_HEIGHT + metrics.verticalSpacing;
   const int quickLinkAreaHeight = QUICK_LINK_ROW_HEIGHT + metrics.verticalSpacing;
   const int contentBottom = pageHeight - metrics.buttonHintsHeight - quickLinkAreaHeight;
   const int contentHeight = contentBottom - contentTop;
   const int rowGap = static_cast<int>(contentHeight * ROW_GAP_RATIO);
 
   const int currentReadHeight = static_cast<int>(contentHeight * CURRENT_READ_HEIGHT_RATIO);
-  const Rect weatherRect{sideMargin, contentTop + static_cast<int>(contentHeight * LOGO_HEIGHT_RATIO) + rowGap,
-                         colAWidth, static_cast<int>(contentHeight * WEATHER_HEIGHT_RATIO)};
   const Rect articlesRect{colBX, contentTop + currentReadHeight + rowGap, colBWidth,
                           contentBottom - (contentTop + currentReadHeight + rowGap)};
+
+  // Matches render()'s left-column stacking (logo, then weather) so the tap
+  // rect lines up with the drawn card.
+  const int logoHeight = static_cast<int>(contentHeight * LOGO_HEIGHT_RATIO);
+  const int weatherHeight = static_cast<int>(contentHeight * WEATHER_HEIGHT_RATIO);
+  const Rect weatherRect{sideMargin, contentTop + logoHeight + rowGap, colAWidth, weatherHeight};
 
   int tapX = 0;
   int tapY = 0;
@@ -213,18 +303,18 @@ void HomeActivity::loop() {
   int touchedCard = -1;
   if (tapped && inRect(Rect{colBX, contentTop, colBWidth, currentReadHeight}, tapX, tapY)) {
     touchedCard = 0;
-  } else if (tapped && inRect(weatherRect, tapX, tapY)) {
-    touchedCard = 1;
   } else if (tapped && inRect(articlesRect, tapX, tapY)) {
     // A tap on a specific cached title jumps straight to that article;
     // anywhere else on the card opens the list, same as button Select.
     const int titleIndex = articleTitleRowIndexAt(articlesRect, tapX, tapY);
     if (titleIndex >= 0) {
-      selectorIndex = 2;
+      selectorIndex = ARTICLES_CARD_INDEX;
       activityManager.goToArticleModule(SETTINGS.articlesIds[titleIndex]);
       return;
     }
-    touchedCard = 2;
+    touchedCard = ARTICLES_CARD_INDEX;
+  } else if (tapped && inRect(weatherRect, tapX, tapY)) {
+    touchedCard = WEATHER_CARD_INDEX;
   }
   if (touchedCard != -1) {
     selectorIndex = touchedCard;
@@ -269,18 +359,37 @@ int HomeActivity::drawWrappedTitle(const int x, const int y, const int maxWidth,
 }
 
 void HomeActivity::drawLogoCard(const Rect& rect) const {
-  renderer.drawRoundedRect(rect.x, rect.y, rect.width, rect.height, 1, 8, true);
-  // drawCenteredText centers on the full screen width, not a rect, so we
-  // center this narrow card's title manually to keep it inside the card.
-  const char* title = tr(STR_HOME_LOGO_TITLE);
-  const auto lines = renderer.wrappedText(RESPONDER_18_FONT_ID, title, rect.width - 16, 2, EpdFontFamily::BOLD);
-  const int lineHeight = renderer.getLineHeight(RESPONDER_18_FONT_ID);
-  int lineY = rect.y + (rect.height - lineHeight * static_cast<int>(lines.size())) / 2;
-  for (const auto& line : lines) {
-    const int lineWidth = renderer.getTextWidth(RESPONDER_18_FONT_ID, line.c_str(), EpdFontFamily::BOLD);
-    renderer.drawText(RESPONDER_18_FONT_ID, rect.x + (rect.width - lineWidth) / 2, lineY, line.c_str(), true,
-                      EpdFontFamily::BOLD);
-    lineY += lineHeight;
+  // No border: the wordmark is a masthead, not a card among equals, and now
+  // sits in the space the shared header band used to leave empty (SLO-19).
+  const int iconX = rect.x + (rect.width - LOGO_ICON_WIDTH) / 2;
+  const int iconY = rect.y + (rect.height - LOGO_ICON_HEIGHT) / 2;
+  renderer.drawIcon(Slofone_logoIcon, iconX, iconY, LOGO_ICON_WIDTH, LOGO_ICON_HEIGHT);
+}
+
+void HomeActivity::drawStatusBar(const Rect& rect) const {
+  const bool showPercentage =
+      SETTINGS.hideBatteryPercentage != CrossPointSettings::HIDE_BATTERY_PERCENTAGE::HIDE_ALWAYS;
+  const bool charging = gpio.isUsbConnected();
+  const uint16_t percentage = std::min<uint16_t>(powerManager.getBatteryPercentage(), 100);
+  const BatteryIcon icon = batteryIconFor(percentage, charging);
+
+  char percentText[8] = {0};
+  int percentWidth = 0;
+  if (showPercentage) {
+    snprintf(percentText, sizeof(percentText), "%u%%", static_cast<unsigned>(percentage));
+    percentWidth = renderer.getTextWidth(UI_10_FONT_ID, percentText);
+  }
+
+  constexpr int iconTextGap = 6;
+  const int groupWidth = icon.width + (showPercentage ? iconTextGap + percentWidth : 0);
+  const int iconX = rect.x + rect.width - groupWidth;
+  const int iconY = rect.y + (rect.height - BATTERY_ICON_HEIGHT) / 2;
+  renderer.drawIcon(icon.bitmap, iconX, iconY, icon.width, BATTERY_ICON_HEIGHT);
+
+  if (showPercentage) {
+    const int textX = iconX + icon.width + iconTextGap;
+    const int textY = rect.y + (rect.height - renderer.getLineHeight(UI_10_FONT_ID)) / 2;
+    renderer.drawText(UI_10_FONT_ID, textX, textY, percentText, true);
   }
 }
 
@@ -293,22 +402,20 @@ void HomeActivity::drawWeatherCard(const Rect& rect, bool selected) const {
   }
   const int textWidth = renderer.getTextWidth(RESPONDER_18_FONT_ID, tempLabel, EpdFontFamily::BOLD);
 
-  // Simple circle glyph, standing in for the real conditions icon until
-  // per-condition icon assets are added. Laid out side by side with the
-  // temperature as one horizontally centered group.
-  const int radius = std::min(rect.width, rect.height) / 8;
+  // Per-condition icon, laid out side by side with the temperature as one
+  // horizontally centered group. drawIcon has no scaling path — size must
+  // match the 32x32 the icons were generated at (matches QUICK_LINK_ICON_SIZE),
+  // or it misreads the bitmap's row stride.
+  constexpr int iconSize = QUICK_LINK_ICON_SIZE;
   constexpr int iconTextGap = 10;
-  const int groupWidth = radius * 2 + iconTextGap + textWidth;
+  const int groupWidth = iconSize + iconTextGap + textWidth;
   const int groupX = rect.x + (rect.width - groupWidth) / 2;
   const int groupY = rect.y + rect.height / 2;
 
-  const int cx = groupX + radius;
-  renderer.drawArc(radius, cx, groupY, 1, 1, 2, true);
-  renderer.drawArc(radius, cx, groupY, -1, 1, 2, true);
-  renderer.drawArc(radius, cx, groupY, 1, -1, 2, true);
-  renderer.drawArc(radius, cx, groupY, -1, -1, 2, true);
+  const uint8_t* icon = weatherConditionIcon(conditionLabel(SETTINGS.weatherLastConditionCode));
+  renderer.drawIcon(icon, groupX, groupY - iconSize / 2, iconSize);
 
-  const int textX = groupX + radius * 2 + iconTextGap;
+  const int textX = groupX + iconSize + iconTextGap;
   const int textY = groupY - renderer.getLineHeight(RESPONDER_18_FONT_ID) / 2;
   renderer.drawText(RESPONDER_18_FONT_ID, textX, textY, tempLabel, true, EpdFontFamily::BOLD);
 }
@@ -419,11 +526,76 @@ void HomeActivity::drawCurrentReadCard(const Rect& rect, bool selected) const {
     return;
   }
 
-  const auto lines = renderer.wrappedText(UI_12_FONT_ID, recentBooks[0].title.c_str(), rect.width - padding * 2, 4);
+  const RecentBook& book = recentBooks[0];
+  const Rect coverRect{rect.x + padding, textY, rect.width - padding * 2, rect.y + rect.height - padding - textY};
+
+  if (drawBookCoverThumbnail(book, coverRect)) return;
+
+  // No cover available: synthesize one so the card still reads as a "book"
+  // rather than a blank gap — bordered rectangle with the title set larger
+  // and in a serif face, standing in for cover art.
+  renderer.drawRect(coverRect.x, coverRect.y, coverRect.width, coverRect.height);
+  constexpr int titlePadding = 12;
+  const auto lines =
+      renderer.wrappedText(NOTOSERIF_16_FONT_ID, book.title.c_str(), coverRect.width - titlePadding * 2, 6);
+  int lineY = coverRect.y + titlePadding;
   for (const auto& line : lines) {
-    renderer.drawText(UI_12_FONT_ID, rect.x + padding, textY, line.c_str());
-    textY += renderer.getLineHeight(UI_12_FONT_ID);
+    const int lineWidth = renderer.getTextWidth(NOTOSERIF_16_FONT_ID, line.c_str());
+    renderer.drawText(NOTOSERIF_16_FONT_ID, coverRect.x + (coverRect.width - lineWidth) / 2, lineY, line.c_str());
+    lineY += renderer.getLineHeight(NOTOSERIF_16_FONT_ID);
   }
+}
+
+bool HomeActivity::drawBookCoverThumbnail(const RecentBook& book, const Rect& maxRect) const {
+  if (book.path.empty() || maxRect.width <= 0 || maxRect.height <= 0) return false;
+
+  // Recent-book cover generation is otherwise only wired up for the sleep
+  // screen (SleepActivity), keyed off the single "last opened" book. Mirror
+  // its reopen-and-generate-if-missing pattern here rather than relying on
+  // RecentBook::coverBmpPath, whose templated thumb_[HEIGHT].bmp pipeline
+  // (Epub::generateThumbBmp) has no caller anywhere and is never populated.
+  std::string coverBmpPath;
+  if (FsHelpers::hasXtcExtension(book.path)) {
+    Xtc xtc(book.path, "/.crosspoint");
+    if (!xtc.load() || !xtc.generateCoverBmp()) return false;
+    coverBmpPath = xtc.getCoverBmpPath();
+  } else if (FsHelpers::hasTxtExtension(book.path)) {
+    Txt txt(book.path, "/.crosspoint");
+    if (!txt.load() || !txt.generateCoverBmp()) return false;
+    coverBmpPath = txt.getCoverBmpPath();
+  } else if (FsHelpers::hasEpubExtension(book.path)) {
+    Epub epub(book.path, "/.crosspoint");
+    if (!epub.load(true, true) || !epub.generateCoverBmp()) return false;
+    coverBmpPath = epub.getCoverBmpPath();
+  } else {
+    return false;
+  }
+  if (coverBmpPath.empty()) return false;
+
+  HalFile file;
+  if (!Storage.openFileForRead("HOME", coverBmpPath, file)) return false;
+
+  Bitmap bitmap(file);
+  if (bitmap.parseHeaders() != BmpReaderError::Ok) return false;
+
+  const int imgWidth = bitmap.getWidth();
+  const int imgHeight = bitmap.getHeight();
+  if (imgWidth <= 0 || imgHeight <= 0) return false;
+
+  // Aspect-fit within maxRect, only shrinking (never upscaling a small
+  // cover), then center the result so a non-matching aspect ratio doesn't
+  // hug the top-left corner.
+  const float scale = std::min(
+      1.0f, std::min(static_cast<float>(maxRect.width) / imgWidth, static_cast<float>(maxRect.height) / imgHeight));
+  const int renderWidth = std::max(1, static_cast<int>(imgWidth * scale));
+  const int renderHeight = std::max(1, static_cast<int>(imgHeight * scale));
+  const int renderX = maxRect.x + (maxRect.width - renderWidth) / 2;
+  const int renderY = maxRect.y + (maxRect.height - renderHeight) / 2;
+
+  if (!renderer.drawBitmap(bitmap, renderX, renderY, renderWidth, renderHeight)) return false;
+
+  renderer.drawRect(renderX, renderY, renderWidth, renderHeight);
+  return true;
 }
 
 void HomeActivity::drawQuickLinkStrip(const Rect& rect, int selectedIndex) const {
@@ -477,15 +649,18 @@ void HomeActivity::render(RenderLock&&) {
 
   renderer.clearScreen();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, nullptr);
-
   const int sideMargin = static_cast<int>(pageWidth * SIDE_MARGIN_RATIO);
   const int gutter = static_cast<int>(pageWidth * GUTTER_RATIO);
   const int colAWidth = static_cast<int>(pageWidth * COL_A_WIDTH_RATIO);
   const int colBWidth = static_cast<int>(pageWidth * COL_B_WIDTH_RATIO);
   const int colBX = sideMargin + colAWidth + gutter;
 
-  const int contentTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  // SLO-19: Home has no title, so it replaces the shared header band with its
+  // own slim status row instead of GUI.drawHeader, reclaiming the rest of
+  // that vertical space for the card grid (see STATUS_BAR_HEIGHT above).
+  drawStatusBar(Rect{sideMargin, metrics.topPadding, pageWidth - 2 * sideMargin, STATUS_BAR_HEIGHT});
+
+  const int contentTop = metrics.topPadding + STATUS_BAR_HEIGHT + metrics.verticalSpacing;
   const int quickLinkAreaHeight = QUICK_LINK_ROW_HEIGHT + metrics.verticalSpacing;
   const int contentBottom = pageHeight - metrics.buttonHintsHeight - quickLinkAreaHeight;
   const int contentHeight = contentBottom - contentTop;
@@ -498,7 +673,7 @@ void HomeActivity::render(RenderLock&&) {
   leftY += logoHeight + rowGap;
 
   const int weatherHeight = static_cast<int>(contentHeight * WEATHER_HEIGHT_RATIO);
-  drawWeatherCard(Rect{sideMargin, leftY, colAWidth, weatherHeight}, selectorIndex == 1);
+  drawWeatherCard(Rect{sideMargin, leftY, colAWidth, weatherHeight}, selectorIndex == WEATHER_CARD_INDEX);
   leftY += weatherHeight + rowGap;
 
   const int remindersHeight = static_cast<int>(contentHeight * REMINDERS_HEIGHT_RATIO);
@@ -513,8 +688,8 @@ void HomeActivity::render(RenderLock&&) {
   drawCurrentReadCard(Rect{colBX, contentTop, colBWidth, currentReadHeight}, selectorIndex == 0);
 
   const int articlesY = contentTop + currentReadHeight + rowGap;
-  drawArticlesCard(Rect{colBX, articlesY, colBWidth, contentBottom - articlesY}, selectorIndex == 2,
-                   selectorIndex == 2 ? articlesSelectedRow : -1);
+  drawArticlesCard(Rect{colBX, articlesY, colBWidth, contentBottom - articlesY}, selectorIndex == ARTICLES_CARD_INDEX,
+                   selectorIndex == ARTICLES_CARD_INDEX ? articlesSelectedRow : -1);
 
   // --- Quick-link strip below the card grid ---
   const int quickLinkTop = contentBottom + metrics.verticalSpacing;
