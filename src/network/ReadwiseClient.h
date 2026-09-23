@@ -40,5 +40,12 @@ class ReadwiseClient {
   // Marks a document archived.
   static Error archive(const std::string& documentId);
 
+  // Fetches the full article body as raw HTML (Readwise/Reader's
+  // Mozilla-Readability output — not guaranteed well-formed XHTML; callers
+  // must normalize before handing it to an XML-based parser). Streams the
+  // response through ReadwiseHtmlExtractor rather than buffering the whole
+  // JSON body, so this is safe to call regardless of article length.
+  static Error fetchHtmlContent(const std::string& documentId, std::string& outHtml);
+
   static int lastHttpCode;
 };

@@ -326,8 +326,9 @@ void ActivityManager::goToWeatherModule() {
   replaceActivity(std::make_unique<WeatherModuleActivity>(renderer, mappedInput));
 }
 
-void ActivityManager::goToArticleModule(std::string initialArticleId) {
-  replaceActivity(std::make_unique<ArticleModuleActivity>(renderer, mappedInput, std::move(initialArticleId)));
+void ActivityManager::goToArticleModule(std::string initialArticleId, bool autoReadPendingArticle) {
+  replaceActivity(std::make_unique<ArticleModuleActivity>(renderer, mappedInput, std::move(initialArticleId),
+                                                          autoReadPendingArticle));
 }
 
 void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {

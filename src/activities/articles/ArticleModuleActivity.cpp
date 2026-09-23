@@ -15,6 +15,7 @@
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
+#include "activities/weather/WeatherModuleActivity.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
@@ -36,6 +37,12 @@ void ArticleModuleActivity::onEnter() {
 void ArticleModuleActivity::onExit() {
   Activity::onExit();
   if (shouldTearDownWifiOnExit && WiFi.getMode() != WIFI_MODE_NULL) {
+    // Piggyback weather's hourly refresh here, not on the WiFi connect path:
+    // by now this activity's own Readwise TLS traffic is done and its
+    // buffers are freed, so this doesn't stack a second handshake on top of
+    // the first and risk a heap-fragmentation abort. No-op when the cache is
+    // still fresh (SLO-21).
+    refreshWeatherIfWifiConnected();
     WiFi.disconnect(false);
     delay(30);
     silentRestart();
@@ -89,6 +96,17 @@ void ArticleModuleActivity::beginSync() {
 }
 
 void ArticleModuleActivity::syncArticles() {
+  // ensureWifiConnected()'s callback fires as soon as WiFi.status() first
+  // reports WL_CONNECTED, which can be momentarily ahead of the connection
+  // actually settling (DHCP/DNS) — most visible right after a silent restart
+  // (SLO-15's read flow), where there's been no time for anything else to
+  // run in between. Give it a brief grace window to catch up before treating
+  // a not-yet-connected read as a genuine drop.
+  constexpr uint32_t WIFI_SETTLE_TIMEOUT_MS = 1500;
+  const uint32_t settleDeadline = millis() + WIFI_SETTLE_TIMEOUT_MS;
+  while (WiFi.status() != WL_CONNECTED && millis() < settleDeadline) {
+    delay(50);
+  }
   if (WiFi.status() != WL_CONNECTED) {
     LOG_INF("ARTM", "WiFi dropped before sync could run");
     noWifi = true;
@@ -122,6 +140,11 @@ void ArticleModuleActivity::cacheSyncResultForHomeScreen() {
 }
 
 void ArticleModuleActivity::loop() {
+  if (state == State::CONNECTING) {
+    // Waiting on ensureWifiConnected()'s callback (see the State comment in
+    // the header) — nothing to do yet.
+    return;
+  }
   if (state == State::LOADING) {
     // First-tick: render "Loading..." before the (blocking) network call.
     requestUpdateAndWait();
@@ -139,11 +162,13 @@ void ArticleModuleActivity::openPendingArticleIfPresent() {
   if (pendingArticleId.empty()) return;
   const std::string id = std::move(pendingArticleId);
   pendingArticleId.clear();
+  const bool autoRead = pendingArticleAutoRead;
+  pendingArticleAutoRead = false;
 
   const auto it =
       std::find_if(articles.begin(), articles.end(), [&id](const ReadwiseArticle& a) { return a.id == id; });
   if (it != articles.end()) {
-    activateIndex(static_cast<int>(it - articles.begin()));
+    activateIndexWithAutoRead(static_cast<int>(it - articles.begin()), autoRead);
   }
 }
 
@@ -170,7 +195,7 @@ void ArticleModuleActivity::buildScreen(UiScreen& screen) {
                   static_cast<int16_t>(safe.x)});
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
-  if (state == State::LOADING) {
+  if (state == State::CONNECTING || state == State::LOADING) {
     screen.centeredText(tr(STR_ARTICLE_LOADING), screen.theme().bodyText);
     return;
   }
@@ -192,9 +217,11 @@ void ArticleModuleActivity::buildScreen(UiScreen& screen) {
   screen.list(props);
 }
 
-void ArticleModuleActivity::activateIndex(int index) {
+void ArticleModuleActivity::activateIndex(int index) { activateIndexWithAutoRead(index, false); }
+
+void ArticleModuleActivity::activateIndexWithAutoRead(int index, bool autoRead) {
   if (index < 0 || index >= static_cast<int>(articles.size())) return;
-  startActivityForResult(std::make_unique<ArticleDetailActivity>(renderer, mappedInput, articles[index]),
+  startActivityForResult(std::make_unique<ArticleDetailActivity>(renderer, mappedInput, articles[index], autoRead),
                          [this, index](const ActivityResult& result) { onDetailClosed(index, result); });
 }
 
