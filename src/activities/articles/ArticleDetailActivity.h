@@ -5,13 +5,14 @@
 #include "network/ReadwiseClient.h"
 
 // Metadata view for one Readwise Reader article (SLO-6), with Confirm now
-// opening the full article body (SLO-15) via ArticleReaderActivity: fetches
-// html_content on demand (not cached — see ArticleReaderActivity's header
-// comment), then hands it to the EPUB chapter parser / plain-text fallback.
-// Archive is a secondary action (Right button) so it doesn't collide with
-// Confirm's new meaning.
+// opening the full article body (SLO-15) via ArticleReaderActivity. Archive
+// is a secondary action (Right button) so it doesn't collide with Confirm's
+// new meaning.
 //
-// Reading always goes through silentRestartToArticleRead() first rather than
+// Confirm checks ArticleOfflineCache first: if this article's text was
+// already auto-downloaded (see ArticleModuleActivity::downloadCachedArticleText()),
+// it opens straight from SD — no network, no reboot. Otherwise it falls back
+// to fetching html_content live via silentRestartToArticleRead() rather than
 // fetching directly: by the time this screen exists, the article list sync
 // has already run WiFi/TLS at least once this boot, which reliably
 // fragments this device's heap (see ArticleModuleActivity::onExit()'s own

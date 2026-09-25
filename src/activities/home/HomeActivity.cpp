@@ -85,7 +85,10 @@ BatteryIcon batteryIconFor(uint16_t percentage, bool charging) {
 constexpr float SIDE_MARGIN_RATIO = 16.0f / 480.0f;
 constexpr float GUTTER_RATIO = 16.0f / 480.0f;
 constexpr float COL_A_WIDTH_RATIO = 180.0f / 480.0f;
-constexpr float COL_B_WIDTH_RATIO = 252.0f / 480.0f;
+// Narrower than a plain 480-16-16-180-16=252 split would give: leaves extra
+// gutter on the right so the side-button arrow glyphs (drawSideButtonArrows)
+// have room to sit clear of the screen edge without crowding this column.
+constexpr float COL_B_WIDTH_RATIO = 244.0f / 480.0f;
 constexpr float ROW_GAP_RATIO = 12.0f / 686.0f;
 
 // Left column: logo, weather, top-3 reminders, decorative strip.
@@ -696,9 +699,9 @@ void HomeActivity::render(RenderLock&&) {
   drawQuickLinkStrip(Rect{sideMargin, quickLinkTop, pageWidth - 2 * sideMargin, QUICK_LINK_ROW_HEIGHT},
                      selectorIndex - CARD_COUNT);
 
-  const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), tr(STR_DIR_UP),
-                                            tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  GUI.drawSideButtonArrows(renderer);
 
   renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
 

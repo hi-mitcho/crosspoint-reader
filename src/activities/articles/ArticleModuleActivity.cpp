@@ -1,6 +1,7 @@
 #include "ArticleModuleActivity.h"
 
 #include <GfxRenderer.h>
+#include <HalMemory.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <WiFi.h>
@@ -11,12 +12,15 @@
 #include <variant>
 
 #include "ArticleDetailActivity.h"
+#include "ArticleOfflineCache.h"
+#include "ArticleReaderActivity.h"
 #include "CrossPointSettings.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "activities/weather/WeatherModuleActivity.h"
 #include "components/UITheme.h"
+#include "components/UiAppHelpers.h"
 
 namespace fui = freeink::ui;
 
@@ -31,17 +35,40 @@ void ArticleModuleActivity::onEnter() {
     return;
   }
 
-  beginSync();
+  const bool haveCache = ArticleOfflineCache::loadIndex(articles);
+  if (haveCache) rebuildRowItems();
+
+  const bool pendingTextCached = !pendingArticleId.empty() && ArticleOfflineCache::isTextCached(pendingArticleId);
+  // Sync (and the WiFi it needs) is only required when there's no offline
+  // list yet, or the caller wants to auto-read a specific article whose text
+  // isn't cached — everything else (plain browsing, or a pending article
+  // that's already downloaded) is servable straight from SD.
+  const bool needsSync = !haveCache || (pendingArticleAutoRead && !pendingArticleId.empty() && !pendingTextCached);
+  if (needsSync) {
+    beginSync();
+    return;
+  }
+
+  state = State::LIST;
+  requestUpdate();
+  openPendingArticleIfPresent();
 }
 
 void ArticleModuleActivity::onExit() {
   Activity::onExit();
   if (shouldTearDownWifiOnExit && WiFi.getMode() != WIFI_MODE_NULL) {
     // Piggyback weather's hourly refresh here, not on the WiFi connect path:
-    // by now this activity's own Readwise TLS traffic is done and its
-    // buffers are freed, so this doesn't stack a second handshake on top of
-    // the first and risk a heap-fragmentation abort. No-op when the cache is
-    // still fresh (SLO-21).
+    // by now this activity's own Readwise TLS traffic (list sync plus any
+    // downloadCachedArticleText() downloads) is done and its buffers are
+    // freed, so this doesn't stack concurrent handshakes and risk the
+    // heap-fragmentation abort that hit the earlier WifiSelectionActivity
+    // hook. Always attempted, even on a download-heavy sync pass:
+    // refreshWeatherIfWifiConnected() no-ops on its own cooldown
+    // (weatherCacheIsFresh()) and fails gracefully rather than crashing if
+    // heap is too tight (HttpDownloader::MIN_TLS_FREE_HEAP/MIN_TLS_MAX_ALLOC
+    // preflight) — skipping it here whenever downloads happened would risk
+    // missing the hourly window entirely if WiFi doesn't come back up again
+    // before the next cooldown check.
     refreshWeatherIfWifiConnected();
     WiFi.disconnect(false);
     delay(30);
@@ -122,6 +149,43 @@ void ArticleModuleActivity::syncArticles() {
 
   rebuildRowItems();
   cacheSyncResultForHomeScreen();
+  ArticleOfflineCache::saveIndex(articles);
+  ArticleOfflineCache::pruneArchived(articles);
+  downloadCachedArticleText();
+}
+
+void ArticleModuleActivity::downloadCachedArticleText() {
+  size_t cachedCount = ArticleOfflineCache::cachedTextCount();
+  for (const auto& a : articles) {
+    if (cachedCount >= ArticleOfflineCache::MAX_CACHED_TEXT_COUNT) break;
+    if (ArticleOfflineCache::isTextCached(a.id)) continue;
+
+    // Settle window between sequential TLS handshakes — same insurance as
+    // the delay(30) before silentRestart() below, cheap relative to the risk
+    // of hammering an already fragmenting heap (see onExit()'s comment).
+    delay(50);
+
+    std::string html;
+    const auto fetchErr = ReadwiseClient::fetchHtmlContent(a.id, html);
+    if (fetchErr != ReadwiseClient::OK) {
+      // Stop rather than skip-and-continue: a failure here (especially
+      // LOW_MEMORY) means the next attempt is likely to fail the same way,
+      // and each attempted handshake costs heap/fragmentation even when it
+      // bails out cleanly.
+      const auto heap = HalMemory::getDefaultHeap();
+      LOG_INF("ARTM", "Stopping article text downloads: fetch failed (err %d), free=%zu largest=%zu", fetchErr,
+              heap.freeBytes, heap.largestBlockBytes);
+      break;
+    }
+    if (!ArticleOfflineCache::saveText(a.id, html)) {
+      LOG_ERR("ARTM", "Failed to save cached text for article %s", a.id.c_str());
+      break;
+    }
+    cachedCount++;
+    const auto heap = HalMemory::getDefaultHeap();
+    LOG_INF("ARTM", "Cached article text for %s (%zu/%d, free=%zu largest=%zu)", a.id.c_str(), cachedCount,
+            ArticleOfflineCache::MAX_CACHED_TEXT_COUNT, heap.freeBytes, heap.largestBlockBytes);
+  }
 }
 
 void ArticleModuleActivity::cacheSyncResultForHomeScreen() {
@@ -167,9 +231,30 @@ void ArticleModuleActivity::openPendingArticleIfPresent() {
 
   const auto it =
       std::find_if(articles.begin(), articles.end(), [&id](const ReadwiseArticle& a) { return a.id == id; });
-  if (it != articles.end()) {
-    activateIndexWithAutoRead(static_cast<int>(it - articles.begin()), autoRead);
+  if (it == articles.end()) return;
+
+  if (autoRead && ArticleOfflineCache::isTextCached(id)) {
+    // No new WiFi/TLS session needed — skip ArticleDetailActivity and the
+    // restart-based heap defrag entirely (see ArticleDetailActivity.cpp's
+    // Confirm handler for the equivalent, non-restart branch).
+    openCachedArticleDirectly(*it);
+    return;
   }
+  activateIndexWithAutoRead(static_cast<int>(it - articles.begin()), autoRead);
+}
+
+void ArticleModuleActivity::openCachedArticleDirectly(const ReadwiseArticle& article) {
+  std::string html;
+  if (!ArticleOfflineCache::loadText(article.id, html)) {
+    // Cache entry vanished between the isTextCached() check and here (e.g.
+    // pruned) — fall back to the normal (network-requiring) detail flow.
+    const auto it = std::find_if(articles.begin(), articles.end(),
+                                 [&article](const ReadwiseArticle& a) { return a.id == article.id; });
+    if (it != articles.end()) activateIndexWithAutoRead(static_cast<int>(it - articles.begin()), true);
+    return;
+  }
+  startActivityForResult(std::make_unique<ArticleReaderActivity>(renderer, mappedInput, article.title, std::move(html)),
+                         [this](const ActivityResult&) { requestUpdate(); });
 }
 
 int ArticleModuleActivity::listCount() const { return state == State::LIST ? static_cast<int>(articles.size()) : 0; }
@@ -181,6 +266,7 @@ void ArticleModuleActivity::rebuildRowItems() {
     fui::ListItem item;
     item.label = a.title.empty() ? tr(STR_ARTICLE_UNTITLED) : a.title.c_str();
     if (!a.author.empty()) item.subtitle = a.author.c_str();
+    if (ArticleOfflineCache::isTextCached(a.id)) item.icon = listIconFor(UIIcon::Download, 24);
     rowItems_.push_back(item);
   }
 }
@@ -240,3 +326,28 @@ void ArticleModuleActivity::onDetailClosed(int index, const ActivityResult& resu
 }
 
 const char* ArticleModuleActivity::headerTitle() const { return tr(STR_ARTICLE_MODULE_TITLE); }
+
+bool ArticleModuleActivity::handleCustomInput() {
+  if (state != State::LIST) return false;
+  if (mappedInput.wasReleased(MappedInputManager::Button::Right)) {
+    refreshRequested();
+    return true;
+  }
+  return false;
+}
+
+void ArticleModuleActivity::drawFooter() {
+  if (state != State::LIST) {
+    UiListActivity::drawFooter();
+    return;
+  }
+  // Front Right is repurposed for manual refresh; list scrolling is side
+  // Up/Down only app-wide now (see MappedInputManager::mapButton()'s
+  // NavNext/NavPrevious case), so there's no footer slot left to reclaim for
+  // it. Left stays unlabeled/unused, matching every other list screen.
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), "", tr(STR_ARTICLE_REFRESH));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  GUI.drawSideButtonArrows(renderer);
+}
+
+void ArticleModuleActivity::refreshRequested() { beginSync(); }

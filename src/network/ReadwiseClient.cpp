@@ -1,15 +1,14 @@
 #include "ReadwiseClient.h"
 
-#include <ArduinoJson.h>
 #include <HalMemory.h>
 #include <Logging.h>
 #include <SecureHttpClient.h>
 
 #include <cstdio>
-#include <utility>
 
 #include "CrossPointSettings.h"
 #include "ReadwiseHtmlExtractor.h"
+#include "ReadwiseListExtractor.h"
 
 int ReadwiseClient::lastHttpCode = 0;
 
@@ -27,8 +26,19 @@ constexpr uint32_t MIN_BLOCK_FOR_TLS = 20000;
 // its call site). MIN_FREE_DURING_EXTRACTION is lower than MIN_FREE_FOR_TLS
 // because it's measured mid-connection, after wolfSSL's own session state is
 // already live and counted against free heap, not as a preflight check.
+//
+// freeBytes alone doesn't catch everything: extractor.feed() grows html_ one
+// push_back() at a time, and each reallocation needs a single NEW contiguous
+// block at least as large as the next capacity while the old one is still
+// live for the copy -- that can fail even when total free bytes look fine if
+// the heap is fragmented into many smaller blocks. largestBlockBytes is the
+// metric that actually bounds a single allocation (same reasoning
+// insufficientHeap() already applies to the TLS handshake itself); checked
+// here too, generously, since we can't know the next reallocation's exact
+// size from outside std::string's growth policy.
 constexpr size_t MAX_ARTICLE_HTML_BYTES = 128 * 1024;
 constexpr size_t MIN_FREE_DURING_EXTRACTION = 15000;
+constexpr size_t MIN_BLOCK_DURING_EXTRACTION = 20000;
 
 bool insufficientHeap() {
   const auto heap = HalMemory::getDefaultHeap();
@@ -64,37 +74,35 @@ ReadwiseClient::Error ReadwiseClient::listUnarchived(std::vector<ReadwiseArticle
     return NETWORK_ERROR;
   }
   applyAuthHeader(http);
-  const int httpCode = http.GET();
-  const std::string body = http.getString();
+
+  outArticles.reserve(static_cast<size_t>(limit));
+
+  // Parses the "results" array directly from the byte stream as it arrives
+  // (see ReadwiseListExtractor's header for why): buffering the whole body
+  // into one std::string, then handing it to ArduinoJson, needed a single
+  // contiguous allocation as large as the response -- confirmed on hardware
+  // that this device's typical post-WiFi-connect heap can have plenty of
+  // total free bytes but no single contiguous block big enough, and no
+  // amount of growth-step tuning fixes a problem that's fundamentally about
+  // needing one large block at all.
+  ReadwiseListExtractor extractor(outArticles);
+  const int httpCode = http.GET([&extractor](const uint8_t* data, size_t len) {
+    extractor.feed(reinterpret_cast<const char*>(data), len);
+    return !extractor.done();
+  });
   http.end();
   lastHttpCode = httpCode;
 
+  if (extractor.error()) {
+    LOG_ERR("READWISE", "List response malformed or exceeded the parser's runaway-response cap");
+    return SERVER_ERROR;
+  }
   if (httpCode <= 0) return NETWORK_ERROR;
   if (httpCode == 401 || httpCode == 403) return AUTH_FAILED;
   if (httpCode < 200 || httpCode >= 300) return SERVER_ERROR;
-
-  JsonDocument doc;
-  if (deserializeJson(doc, body)) {
-    LOG_ERR("READWISE", "List response JSON parse failed");
+  if (!extractor.done()) {
+    LOG_ERR("READWISE", "List response's \"results\" array never closed");
     return SERVER_ERROR;
-  }
-
-  for (JsonObject item : doc["results"].as<JsonArray>()) {
-    const std::string location = item["location"] | "";
-    if (location == "archive" || location == "feed") continue;  // not a reading-queue item
-
-    const std::string category = item["category"] | "";
-    if (category == "highlight" || category == "note") continue;  // annotations, not readable articles
-
-    ReadwiseArticle article;
-    article.id = item["id"] | "";
-    if (article.id.empty()) continue;
-    article.title = item["title"] | "";
-    article.author = item["author"] | "";
-    article.summary = item["summary"] | "";
-    article.location = location;
-    article.wordCount = item["word_count"] | 0;
-    outArticles.push_back(std::move(article));
   }
 
   return OK;
@@ -161,8 +169,9 @@ ReadwiseClient::Error ReadwiseClient::fetchHtmlContent(const std::string& docume
   const int httpCode = http.GET([&extractor, &tooLarge](const uint8_t* data, size_t len) {
     extractor.feed(reinterpret_cast<const char*>(data), len);
     if (extractor.done()) return false;
-    if (extractor.size() > MAX_ARTICLE_HTML_BYTES ||
-        HalMemory::getDefaultHeap().freeBytes < MIN_FREE_DURING_EXTRACTION) {
+    const auto heap = HalMemory::getDefaultHeap();
+    if (extractor.size() > MAX_ARTICLE_HTML_BYTES || heap.freeBytes < MIN_FREE_DURING_EXTRACTION ||
+        heap.largestBlockBytes < MIN_BLOCK_DURING_EXTRACTION) {
       tooLarge = true;
       return false;
     }

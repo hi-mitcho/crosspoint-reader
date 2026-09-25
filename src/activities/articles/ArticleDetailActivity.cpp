@@ -5,6 +5,7 @@
 
 #include <cstdio>
 
+#include "ArticleOfflineCache.h"
 #include "ArticleReaderActivity.h"
 #include "SilentRestart.h"
 #include "components/UITheme.h"
@@ -59,6 +60,16 @@ void ArticleDetailActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    // Already downloaded (ArticleModuleActivity::downloadCachedArticleText())
+    // — no new WiFi/TLS session needed, so open directly instead of paying
+    // for the restart-based heap defrag below.
+    std::string html;
+    if (ArticleOfflineCache::loadText(article.id, html)) {
+      startActivityForResult(
+          std::make_unique<ArticleReaderActivity>(renderer, mappedInput, article.title, std::move(html)),
+          [this](const ActivityResult&) { requestUpdate(); });
+      return;
+    }
     // Reboots (see this class's header comment); this activity is torn down
     // here, not resumed — the far side is a fresh ArticleModuleActivity with
     // autoRead=true, not a continuation of this loop().
